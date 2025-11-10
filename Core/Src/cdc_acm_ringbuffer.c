@@ -208,10 +208,10 @@ void usbd_cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
         
         if (written < nbytes) {
             // 缓冲区满，数据丢失
-            USB_LOG_WRN("RX buffer overflow, lost %d bytes\r\n", nbytes - written);
+            USB_LOG_WRN("RX buffer overflow, lost %ld bytes\r\n", nbytes - written);
         }
         
-        USB_LOG_DBG("Received %d bytes, buffered %d bytes\r\n", nbytes, written);
+        USB_LOG_DBG("Received %d bytes, buffered %ld bytes\r\n", nbytes, written);
     }
     
     // 继续启动下一次USB接收
@@ -321,7 +321,7 @@ int cdc_acm_send_data(uint8_t busid, const uint8_t *data, uint32_t len)
     // 立即尝试发送
     cdc_acm_try_send(busid);
     
-    USB_LOG_INFO("Written %d bytes\r\n", written);
+    USB_LOG_INFO("Written %ld bytes\r\n", written);
     return (int)written;
 }
 
@@ -333,7 +333,7 @@ int cdc_acm_read_data(uint8_t *buffer, uint32_t max_len)
     }
 
     uint32_t used = chry_ringbuffer_get_used(&rx_ringbuf);
-    USB_LOG_INFO("Read %d bytes\r\n", used);
+    USB_LOG_INFO("Read %ld bytes\r\n", used);
 
     return (int)chry_ringbuffer_read(&rx_ringbuf, buffer, max_len);
 }

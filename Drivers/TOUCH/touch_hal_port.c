@@ -59,6 +59,17 @@ uint8_t TOUCH_HW_Read_INT(void)
     return HAL_GPIO_ReadPin(CT_INT_PORT, CT_INT_PIN);
 }
 
+void TOUCH_HW_Set_INT_Mode_Output(void)
+{
+    GPIO_InitTypeDef GPIO_Initure;
+    
+    GPIO_Initure.Pin = CT_INT_PIN;  // PB1
+    GPIO_Initure.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_Initure.Pull = GPIO_NOPULL;
+    GPIO_Initure.Speed = GPIO_SPEED_HIGH;
+    HAL_GPIO_Init(CT_INT_PORT, &GPIO_Initure);
+}
+
 /*
 ================================================================================
   2. 软件 I2C (基于 ctiic.c)

@@ -35,6 +35,9 @@ void TOUCH_HW_Set_RST(uint8_t state);
  */
 uint8_t TOUCH_HW_Read_INT(void);
 
+void TOUCH_HW_Set_INT_Mode_Output(void);
+
+
 
 /*
 ================================================================================

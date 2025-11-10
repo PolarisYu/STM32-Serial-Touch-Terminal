@@ -48,11 +48,45 @@ typedef struct {
     bool pressed; // 按键状态
 } TouchKey_t;
 
-/*
-================================================================================
-  2. 私有 (static) 变量 (移植自 main.c)
-================================================================================
-*/
+/**
+ * @brief 触摸状态枚举
+ */
+typedef enum {
+    TOUCH_STATE_IDLE = 0,       // 无触摸
+    TOUCH_STATE_PRESSED,        // 刚按下（仅触发一次）
+    TOUCH_STATE_HOLDING,        // 保持按下
+    TOUCH_STATE_RELEASED        // 刚抬起（仅触发一次）
+} TouchState_t;
+
+/**
+ * @brief 触摸上下文结构体
+ */
+typedef struct {
+    TouchState_t state;         // 当前状态
+    uint8_t last_point_count;   // 上一次的触摸点数量
+    uint16_t press_x;           // 按下时的 X 坐标
+    uint16_t press_y;           // 按下时的 Y 坐标
+    uint16_t current_x;         // 当前 X 坐标
+    uint16_t current_y;         // 当前 Y 坐标
+    uint32_t press_time;        // 按下时的时间戳（用于长按检测）
+    TouchKey_t* pressed_key;    // 当前按下的按键
+} TouchContext_t;
+
+// 全局触摸上下文
+static TouchContext_t g_touch_ctx = {
+    .state = TOUCH_STATE_IDLE,
+    .last_point_count = 0,
+    .press_x = 0,
+    .press_y = 0,
+    .current_x = 0,
+    .current_y = 0,
+    .press_time = 0,
+    .pressed_key = NULL
+};
+
+#define RELEASE_DEBOUNCE_FRAMES 40 // 连续 40 帧检测不到触摸才确认抬起
+static uint8_t g_release_debounce_count = 0; // 抬起去抖计数器
+
 
 // --- USB Bus ID ---
 static uint8_t g_busid = 0;
@@ -96,6 +130,8 @@ static TouchKey_t keyboard_layout[] = {
     {KEY_M*9+KEY_W*8, KEYBOARD_GRID_Y+(KEY_H+KEY_M)*2, KEY_W, KEY_H, "K", COLOR_KEY_BG, false},
     {KEY_M*10+KEY_W*9, KEYBOARD_GRID_Y+(KEY_H+KEY_M)*2, KEY_W, KEY_H, "L", COLOR_KEY_BG, false},
 
+    {KEY_M*1 + KEY_W*0, KEYBOARD_GRID_Y+(KEY_H+KEY_M)*3, (KEY_W*2 + KEY_M*1), KEY_H, "SEND", COLOR_KEY_SPECIAL, false},
+
     {KEY_M*3+KEY_W*2, KEYBOARD_GRID_Y+(KEY_H+KEY_M)*3, KEY_W, KEY_H, "Z", COLOR_KEY_BG, false},
     {KEY_M*4+KEY_W*3, KEYBOARD_GRID_Y+(KEY_H+KEY_M)*3, KEY_W, KEY_H, "X", COLOR_KEY_BG, false},
     {KEY_M*5+KEY_W*4, KEYBOARD_GRID_Y+(KEY_H+KEY_M)*3, KEY_W, KEY_H, "C", COLOR_KEY_BG, false},
@@ -133,8 +169,8 @@ static TouchKey_t control_buttons[] = {
 // 日志
 static char rx_log_lines[MAX_LOG_LINES][MAX_LOG_WIDTH] = {0};
 static char tx_log_lines[MAX_LOG_LINES][MAX_LOG_WIDTH] = {0};
-static int rx_log_idx = 0;
-static int tx_log_idx = 0;
+// static int rx_log_idx = 0;
+// static int tx_log_idx = 0;
 // 存储 (满足Req 4: 3条以上)
 static char rx_storage[MAX_STORAGE_SLOTS][MAX_STORAGE_WIDTH] = {0};
 static char tx_storage[MAX_STORAGE_SLOTS][MAX_STORAGE_WIDTH] = {0};
@@ -144,7 +180,7 @@ static int tx_storage_idx = 0;
 static char keyboard_buffer[MAX_KEY_BUFFER_LEN] = {0};
 static int keyboard_buffer_idx = 0;
 // 触摸状态
-static bool touch_was_pressed = false;
+// static bool touch_was_pressed = false;
 // 长数据重组 (高级Req 2)
 static char chunk_buffer[MAX_CHUNK_BUFFER_LEN] = {0};
 static int chunk_buffer_idx = 0;
@@ -157,13 +193,19 @@ static bool chunk_receiving = false;
 */
 static void draw_key(TouchKey_t *key);
 static void draw_main_ui(void);
+static void refresh_log_text(bool is_rx_zone);
 static void draw_log_area(bool is_rx_zone);
 static void add_to_log(bool is_rx_zone, const char* msg);
 static void add_to_storage(bool is_rx, const char* msg);
 static void query_storage(bool is_rx);
 static void clear_storage(bool is_rx);
 static TouchKey_t* find_key_at(int x, int y);
+static void handle_touch_pressed(void);
+static void reset_long_press_trigger(void);
+// static uint8_t detect_swipe_gesture(void);
+// static void display_touch_debug_info(void);
 static void handle_key_press(TouchKey_t* key); // busid 从 g_busid 获取
+// static void handle_long_press(TouchKey_t* key);
 static void update_keyboard_buffer_display(void);
 static void process_received_data(uint8_t* data, uint32_t len);
 static void send_chunked_data(void); // busid 从 g_busid 获取
@@ -211,6 +253,9 @@ int App_Terminal_Init(uint8_t busid)
 /**
  * @brief 终端应用的任务轮询
  */
+/**
+ * @brief 终端应用的任务轮询
+ */
 void App_Terminal_Tasks(void)
 {
     // 任务1: 处理USB接收
@@ -218,6 +263,14 @@ void App_Terminal_Tasks(void)
     
     // 任务2: 处理触摸输入
     touch_task_handler();
+    
+    // 任务3 (可选): 显示触摸调试信息
+    #ifdef ENABLE_TOUCH_DEBUG
+    display_touch_debug_info();
+    #endif
+    
+    // 任务4: 定期调用USB发送（确保数据及时发出）
+    cdc_acm_try_send(g_busid);
 }
 
 
@@ -276,6 +329,34 @@ static void draw_main_ui(void)
 }
 
 /**
+  * @brief 仅刷新日志区域的文本（无背景填充）
+  * @note  此函数速度快，用于滚动更新
+  */
+static void refresh_log_text(bool is_rx_zone)
+{
+    uint16_t y_start = is_rx_zone ? ZONE_RX_LOG_Y : ZONE_TX_LOG_Y;
+    char (*log_lines)[MAX_LOG_WIDTH] = is_rx_zone ? rx_log_lines : tx_log_lines;
+    
+    // 关键：设置 LCD_ShowString 的背景色，使其能“擦除”旧文本
+    BACK_COLOR = COLOR_LOG_BG; 
+    POINT_COLOR = COLOR_LOG_TEXT; // (您在文件中定义了 YELLOW)
+    
+    for(int i = 0; i < MAX_LOG_LINES; i++) {
+        // (x, y, width, height, size, *p)
+        // 我们需要先用背景色填充该行，以防新字符串比旧字符串短
+        LCD_Fill(10, y_start + 20 + (i * 16), SCREEN_WIDTH - 10, y_start + 20 + (i * 16) + 16, COLOR_LOG_BG);
+        
+        // 仅在字符串非空时绘制
+        if (log_lines[i][0] != '\0') {
+            LCD_ShowString(10, y_start + 20 + (i * 16), SCREEN_WIDTH - 20, 16, 16, (uint8_t*)log_lines[i]);
+        }
+    }
+    
+    // 恢复默认背景色
+    BACK_COLOR = COLOR_BG;
+}
+
+/**
   * @brief 绘制(刷新)日志区域
   */
 static void draw_log_area(bool is_rx_zone)
@@ -283,7 +364,7 @@ static void draw_log_area(bool is_rx_zone)
     uint16_t y_start = is_rx_zone ? ZONE_RX_LOG_Y : ZONE_TX_LOG_Y;
     uint16_t height = is_rx_zone ? ZONE_RX_LOG_H : ZONE_TX_LOG_H;
     char* title = is_rx_zone ? "PC -> MCU (Received)" : "MCU -> PC (Sent)";
-    char (*log_lines)[MAX_LOG_WIDTH] = is_rx_zone ? rx_log_lines : tx_log_lines;
+    // char (*log_lines)[MAX_LOG_WIDTH] = is_rx_zone ? rx_log_lines : tx_log_lines;
     
     // 擦除区域
     LCD_Fill(0, y_start, SCREEN_WIDTH - 1, y_start + height - 1, COLOR_LOG_BG);
@@ -294,10 +375,11 @@ static void draw_log_area(bool is_rx_zone)
     LCD_ShowString(5, y_start + 3, 200, 16, 16, (uint8_t*)title);
     
     // 绘制日志行
-    POINT_COLOR = COLOR_LOG_TEXT;
-    for(int i = 0; i < MAX_LOG_LINES; i++) {
-        LCD_ShowString(10, y_start + 20 + (i * 16), SCREEN_WIDTH - 20, 16, 16, (uint8_t*)log_lines[i]);
-    }
+    refresh_log_text(is_rx_zone);
+    // POINT_COLOR = COLOR_LOG_TEXT;
+    // for(int i = 0; i < MAX_LOG_LINES; i++) {
+    //     LCD_ShowString(10, y_start + 20 + (i * 16), SCREEN_WIDTH - 20, 16, 16, (uint8_t*)log_lines[i]);
+    // }
 }
 
 /**
@@ -305,17 +387,18 @@ static void draw_log_area(bool is_rx_zone)
   */
 static void add_to_log(bool is_rx_zone, const char* msg)
 {
-    if (is_rx_zone) {
-        strncpy(rx_log_lines[rx_log_idx], msg, MAX_LOG_WIDTH - 1);
-        rx_log_lines[rx_log_idx][MAX_LOG_WIDTH - 1] = '\0'; // 确保null终止
-        rx_log_idx = (rx_log_idx + 1) % MAX_LOG_LINES;
-        draw_log_area(true);
-    } else {
-        strncpy(tx_log_lines[tx_log_idx], msg, MAX_LOG_WIDTH - 1);
-        tx_log_lines[tx_log_idx][MAX_LOG_WIDTH - 1] = '\0';
-        tx_log_idx = (tx_log_idx + 1) % MAX_LOG_LINES;
-        draw_log_area(false);
-    }
+    char (*log_lines)[MAX_LOG_WIDTH] = is_rx_zone ? rx_log_lines : tx_log_lines;
+
+    // 1. [滚动逻辑] 向上滚动字符串缓冲区
+    //    (将 line[1]~[5] 的内容移动到 line[0]~[4])
+    memmove(log_lines[0], log_lines[1], (MAX_LOG_LINES - 1) * MAX_LOG_WIDTH);
+    
+    // 2. 将新消息复制到最后一行
+    strncpy(log_lines[MAX_LOG_LINES - 1], msg, MAX_LOG_WIDTH - 1);
+    log_lines[MAX_LOG_LINES - 1][MAX_LOG_WIDTH - 1] = '\0'; // 确保null终止
+
+    // 3. [高效重绘] 调用快速的文本刷新函数
+    refresh_log_text(is_rx_zone);
 }
 
 /**
@@ -371,10 +454,22 @@ static void clear_storage(bool is_rx)
     if (is_rx) {
         memset(rx_storage, 0, sizeof(rx_storage));
         rx_storage_idx = 0;
+        
+        // 清除日志的内存缓冲区
+        memset(rx_log_lines, 0, sizeof(rx_log_lines));
+        // 重绘该区域（背景+空文本）
+        draw_log_area(true);
+        // 添加一条新消息
         add_to_log(true, "Receive Storage Cleared.");
     } else {
         memset(tx_storage, 0, sizeof(tx_storage));
         tx_storage_idx = 0;
+        
+        // 清除日志的内存缓冲区
+        memset(tx_log_lines, 0, sizeof(tx_log_lines));
+        // 重绘该区域（背景+空文本）
+        draw_log_area(false);
+        // 添加一条新消息
         add_to_log(false, "Send Storage Cleared.");
     }
 }
@@ -414,7 +509,149 @@ static void update_keyboard_buffer_display(void)
 }
 
 /**
+  * @brief 处理按下事件（仅触发一次）
+  */
+static void handle_touch_pressed(void)
+{
+    // 这里可以添加按下音效、震动反馈等
+    // 例如：play_click_sound();
+    // extern void reset_long_press_trigger(void); // 声明一个函数
+    reset_long_press_trigger(); // 调用它
+    // 暂时不执行按键逻辑，等到抬起时再执行（防止误触）
+    // 如果需要立即响应，可以在这里调用 handle_key_press()
+}
+
+static bool long_press_triggered = false; // 全局长按触发标志
+
+/**
+  * @brief 处理保持按下事件（持续触发）
+  */
+static void handle_touch_holding(void)
+{
+    // 可以在这里实现：
+    // 1. 长按检测
+    // 2. 拖动/滑动检测
+    // 3. 显示按下坐标（用于调试）
+    
+    // 示例：长按检测（1秒）
+    uint32_t hold_duration = HAL_GetTick() - g_touch_ctx.press_time;
+    if (hold_duration > 1000)
+    {
+        // 长按触发（仅执行一次）
+        // static bool long_press_triggered = false;
+        if (!long_press_triggered && g_touch_ctx.pressed_key)
+        {
+            long_press_triggered = true;
+            // 执行长按逻辑
+            // 例如：handle_long_press(g_touch_ctx.pressed_key);
+        }
+    }
+}
+
+
+static void reset_long_press_trigger(void) // 定义重置函数
+{
+    long_press_triggered = false;
+}
+
+/**
+  * @brief 处理抬起事件（仅触发一次）
+  */
+static void handle_touch_released(void)
+{
+    // ⭐ 关键：只有在抬起时才执行按键逻辑（类似真实按钮）
+    if (g_touch_ctx.pressed_key)
+    {
+        // 检查抬起位置是否还在按键区域内（防止滑出）
+        TouchKey_t* release_key = find_key_at(g_touch_ctx.current_x, g_touch_ctx.current_y);
+        
+        if (release_key == g_touch_ctx.pressed_key)
+        {
+            // 在同一个按键上抬起，执行按键逻辑
+            handle_key_press(g_touch_ctx.pressed_key);
+        }
+        else
+        {
+            // 滑出按键区域，取消操作
+            add_to_log(false, "[Touch] Cancelled (slid out)");
+        }
+        
+        // 清除按键引用
+        g_touch_ctx.pressed_key = NULL;
+    }
+}
+
+/**
+  * @brief 检测滑动手势
+  * @return 0=无手势, 1=上滑, 2=下滑, 3=左滑, 4=右滑
+  */
+// static uint8_t detect_swipe_gesture(void)
+// {
+//     if (g_touch_ctx.state != TOUCH_STATE_RELEASED)
+//         return 0;
+    
+//     int16_t dx = g_touch_ctx.current_x - g_touch_ctx.press_x;
+//     int16_t dy = g_touch_ctx.current_y - g_touch_ctx.press_y;
+    
+//     // 至少滑动 50 像素才算有效
+//     const int16_t SWIPE_THRESHOLD = 50;
+    
+//     if (abs(dx) > abs(dy))
+//     {
+//         // 水平滑动
+//         if (dx > SWIPE_THRESHOLD)
+//             return 4; // 右滑
+//         else if (dx < -SWIPE_THRESHOLD)
+//             return 3; // 左滑
+//     }
+//     else
+//     {
+//         // 垂直滑动
+//         if (dy > SWIPE_THRESHOLD)
+//             return 2; // 下滑
+//         else if (dy < -SWIPE_THRESHOLD)
+//             return 1; // 上滑
+//     }
+    
+//     return 0; // 无手势
+// }
+
+/**
+  * @brief 在屏幕上显示触摸状态（调试用）
+  */
+// static void display_touch_debug_info(void)
+// {
+//     char debug_str[100];
+    
+//     // 擦除旧内容
+//     LCD_Fill(600, 5, 790, 25, COLOR_BG);
+    
+//     // 显示状态
+//     POINT_COLOR = RED;
+//     switch (g_touch_ctx.state)
+//     {
+//         case TOUCH_STATE_PRESSED:
+//             sprintf(debug_str, "PRESS (%d,%d)", g_touch_ctx.press_x, g_touch_ctx.press_y);
+//             break;
+//         case TOUCH_STATE_HOLDING:
+//             sprintf(debug_str, "HOLD (%d,%d)", g_touch_ctx.current_x, g_touch_ctx.current_y);
+//             break;
+//         case TOUCH_STATE_RELEASED:
+//             sprintf(debug_str, "RELEASE");
+//             break;
+//         default:
+//             sprintf(debug_str, "IDLE");
+//             break;
+//     }
+    
+//     LCD_ShowString(600, 5, 190, 16, 16, (uint8_t*)debug_str);
+// }
+
+/**
   * @brief 处理按键的核心逻辑
+  */
+/**
+  * @brief 处理按键的核心逻辑（抬起时调用）
   */
 static void handle_key_press(TouchKey_t* key)
 {
@@ -436,49 +673,72 @@ static void handle_key_press(TouchKey_t* key)
             update_keyboard_buffer_display();
         }
     }
-    // --- 3. 发送键 (SEND) (Req 3) ---
+    // --- 3. 发送键 (SEND) ---
     else if (strcmp(key->label, "SEND") == 0) {
         if (keyboard_buffer_idx > 0) {
             cdc_acm_send_data(g_busid, (uint8_t*)keyboard_buffer, keyboard_buffer_idx);
             add_to_log(false, keyboard_buffer);
-            // 清空
             keyboard_buffer_idx = 0;
             keyboard_buffer[0] = '\0';
             update_keyboard_buffer_display();
         }
     }
-    // --- 4. 存储键 (Req 4) ---
+    // --- 4. 存储键 ---
     else if (strcmp(key->label, "Store TX") == 0) {
         if(keyboard_buffer_idx > 0) {
             add_to_storage(false, keyboard_buffer);
         }
     }
     else if (strcmp(key->label, "Store RX") == 0) {
-        // 存储最后一条接收的日志
-        int last_rx_idx = (rx_log_idx == 0) ? (MAX_LOG_LINES - 1) : (rx_log_idx - 1);
-        if(rx_log_lines[last_rx_idx][0] != '\0') {
-             add_to_storage(true, rx_log_lines[last_rx_idx]);
+        // [正确逻辑] 存储滚动日志的最后一行 (即数组的最后一条)
+        int last_line_index = MAX_LOG_LINES - 1;
+        
+        if(rx_log_lines[last_line_index][0] != '\0') {
+            add_to_storage(true, rx_log_lines[last_line_index]);
         }
     }
-    // --- 5. 查询键 (Req 5) ---
+    // --- 5. 查询键 ---
     else if (strcmp(key->label, "Query TX") == 0) {
         query_storage(false);
     }
     else if (strcmp(key->label, "Query RX") == 0) {
         query_storage(true);
     }
-    // --- 6. 清除键 (Req 5) ---
+    // --- 6. 清除键 ---
     else if (strcmp(key->label, "Clear TX") == 0) {
         clear_storage(false);
     }
     else if (strcmp(key->label, "Clear RX") == 0) {
         clear_storage(true);
     }
-    // --- 7. 高级: 分包发送 (Req 6) ---
+    // --- 7. 分包发送 ---
     else if (strcmp(key->label, "Send 8-Byte Chunks") == 0) {
         send_chunked_data();
     }
 }
+
+/**
+  * @brief 处理长按逻辑（示例：长按 "Store TX" 清空输入框）
+  */
+// static void handle_long_press(TouchKey_t* key)
+// {
+//     if (strcmp(key->label, "Store TX") == 0)
+//     {
+//         // 长按 Store TX 清空输入框
+//         keyboard_buffer_idx = 0;
+//         keyboard_buffer[0] = '\0';
+//         update_keyboard_buffer_display();
+//         add_to_log(false, "[Long Press] Input cleared.");
+//     }
+//     else if (strcmp(key->label, "Bksp") == 0)
+//     {
+//         // 长按退格键清空所有
+//         keyboard_buffer_idx = 0;
+//         keyboard_buffer[0] = '\0';
+//         update_keyboard_buffer_display();
+//         add_to_log(false, "[Long Press] All cleared.");
+//     }
+// }
 
 /**
   * @brief 任务1: 处理USB接收环形缓冲区的数据
@@ -547,48 +807,109 @@ static void process_received_data(uint8_t* data, uint32_t len)
 }
 
 /**
-  * @brief 任务2: 处理触摸屏输入
+  * @brief 任务2: 处理触摸屏输入 (已修复竞态条件)
   */
 static void touch_task_handler(void)
 {
-    static TouchKey_t* last_pressed_key = NULL;
-    GT_TouchPoint_t tp_data[1]; // 我们只关心第一个点
+    GT_TouchPoint_t tp_data[GT_MAX_POINTS];
+    uint8_t touch_count = GT9147_Scan(tp_data, GT_MAX_POINTS);
     
-    uint8_t touch_count = GT9147_Scan(tp_data, 1);
+    // =========================================================================
+    // 状态机：检测按下、保持、抬起
+    // =========================================================================
     
     if (touch_count > 0)
     {
-        // 这是一个新的按下事件
-        if (!touch_was_pressed)
+        // =====================================================================
+        // 情况1: 有触摸点 (按下或保持)
+        // =====================================================================
+        
+        // 只要检测到触摸，就重置“释放防抖”计数器
+        g_release_debounce_count = 0;
+        
+        // 更新坐标
+        g_touch_ctx.current_x = tp_data[0].x;
+        g_touch_ctx.current_y = tp_data[0].y;
+        
+        if (g_touch_ctx.state == TOUCH_STATE_IDLE || g_touch_ctx.state == TOUCH_STATE_RELEASED)
         {
-            touch_was_pressed = true;
-            TouchKey_t* key = find_key_at(tp_data[0].x, tp_data[0].y);
+            // ------------------------------------------------------------------
+            // 从 无触摸 -> 有触摸：这是一个新的按下事件
+            // ------------------------------------------------------------------
+            g_touch_ctx.state = TOUCH_STATE_PRESSED;
+            g_touch_ctx.press_x = tp_data[0].x;
+            g_touch_ctx.press_y = tp_data[0].y;
+            g_touch_ctx.press_time = HAL_GetTick();
+            
+            // 查找被按下的按键
+            TouchKey_t* key = find_key_at(g_touch_ctx.press_x, g_touch_ctx.press_y);
             if (key)
             {
-                last_pressed_key = key;
+                g_touch_ctx.pressed_key = key;
                 key->pressed = true;
                 draw_key(key); // 绘制按下效果
-                
-                // 处理按键逻辑
-                handle_key_press(key);
             }
+            
+            // [调用] 按下瞬间的处理
+            handle_touch_pressed();
+        }
+        else
+        {
+            // ------------------------------------------------------------------
+            // 从 有触摸 -> 有触摸：保持按下状态
+            // ------------------------------------------------------------------
+            g_touch_ctx.state = TOUCH_STATE_HOLDING;
+            
+            // [调用] 持续按下期间的处理
+            handle_touch_holding();
         }
     }
     else
     {
-        // 触摸已释放
-        if (touch_was_pressed)
+        // =====================================================================
+        // 情况2: 无触摸点 (可能是抬起，也可能是竞态条件)
+        // =====================================================================
+        
+        if (g_touch_ctx.state == TOUCH_STATE_PRESSED || g_touch_ctx.state == TOUCH_STATE_HOLDING)
         {
-            touch_was_pressed = false;
-            // 恢复上次按下的键的外观
-            if (last_pressed_key)
+            // ------------------------------------------------------------------
+            // 从 有触摸 -> 无触摸：这是一个 *可能* 的抬起事件
+            // ------------------------------------------------------------------
+            
+            // 增加防抖计数器
+            g_release_debounce_count++;
+            
+            if (g_release_debounce_count >= RELEASE_DEBOUNCE_FRAMES)
             {
-                last_pressed_key->pressed = false;
-                draw_key(last_pressed_key);
-                last_pressed_key = NULL;
+                // 连续 N 帧都读到 0，我们 *确认* 手指已抬起
+                g_touch_ctx.state = TOUCH_STATE_RELEASED;
+                
+                // 恢复按键外观
+                if (g_touch_ctx.pressed_key)
+                {
+                    g_touch_ctx.pressed_key->pressed = false;
+                    draw_key(g_touch_ctx.pressed_key);
+                }
+                
+                // [调用] 抬起瞬间的处理
+                handle_touch_released();
+                
+                // 重置计数器
+                g_release_debounce_count = 0;
             }
         }
+        else
+        {
+            // ------------------------------------------------------------------
+            // 从 无触摸 -> 无触摸：保持空闲状态
+            // ------------------------------------------------------------------
+            g_touch_ctx.state = TOUCH_STATE_IDLE;
+            g_release_debounce_count = 0;
+        }
     }
+    
+    // ⭐ 移除：g_touch_ctx.last_point_count 不再需要
+    // g_touch_ctx.last_point_count = touch_count;
 }
 
 /**
