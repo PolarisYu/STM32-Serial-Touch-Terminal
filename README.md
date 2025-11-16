@@ -1,6 +1,6 @@
 # STM32 触控串口终端 (Serial Touch Terminal)
 
-![License](https://img.shields.io/badge/License-"CC-BY-NC-SA 3.0"-blue.svg)
+![License: CC BY-NC-SA](https://img.shields.io/badge/License-CC--BY--NC--SA-blue.svg)
 ![Framework](https://img.shields.io/badge/Framework-STM32CubeHAL-blue.svg)
 ![USB](https://img.shields.io/badge/USB_Stack-CherryUSB-red.svg)
 
