@@ -136,4 +136,4 @@ flowchart TB
 
 ## 📄 许可
 
-本项目基于 CC-BY-NC-SA 3.0 授权。
+本项目基于 `CC-BY-NC-SA 3.0` 授权。
