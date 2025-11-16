@@ -8,16 +8,10 @@
 
 该项目最大的特点是其**高度解耦的软件架构**，将应用逻辑、驱动逻辑和硬件抽象层完全分离，使其易于维护、移植和扩展。
 
-## 📸 演示
-
-*(强烈建议：在此处插入一张您的开发板运行本项目的照片或GIF动图)*
-
-`[Image or GIF of the terminal UI in action]`
-
 ## ✨ 主要功能
 
 * **USB 虚拟串口 (CDC)**: 基于 `CherryUSB` 协议栈实现，与PC（Windows/Linux/Mac）即插即用，无需驱动。
-* **双向数据日志**: 在LCD上分为“接收区”和“发送区”，使用高效的**滚动日志**算法，无闪烁刷新。
+* **双向数据日志**: 在LCD上分为"接收区"和"发送区"，使用高效的**滚动日志**算法，无闪烁刷新。
 * **全功能触控键盘**: 实现了 `A-Z`, `0-9` 字母数字键, `Backspace` 和 `SEND` 键，用于自定义数据发送。
 * **高级触摸逻辑**:
     * **抬起触发**: 仅在手指按下并抬起后才触发按键，防止误触。
@@ -52,34 +46,32 @@
 本项目的核心优势在于其清晰的分层设计，将应用逻辑与底层硬件完全解耦。
 
 ```mermaid
-graph TD
-    subgraph "应用层 (User Application)"
+flowchart TB
+    subgraph Layer1["应用层 (User Application)"]
         direction TB
-        Main["<b>main.c</b><br/>(main() 循环, 系统初始化)"]
-        App["<b>app_terminal.c</b><br/>(UI 逻辑, 状态机, 数据处理)"]
+        Main["<b>main.c</b><br/>main() 循环, 系统初始化"]
+        App["<b>app_terminal.c</b><br/>UI 逻辑, 状态机, 数据处理"]
+        Main --> App
     end
     
-    subgraph "驱动逻辑层 (Device Logic)"
-        direction TB
-        LcdLogic["<b>lcd_logic.c</b><br/>(绘图算法)"]
-        TouchLogic["<b>gt9147_logic.c</b><br/>(触摸坐标解析)"]
-        UsbService["<b>cdc_acm_ringbuffer.c</b><br/>(环形缓冲区管理)"]
+    subgraph Layer2["驱动逻辑层 (Device Logic)"]
+        direction LR
+        LcdLogic["<b>lcd_logic.c</b><br/>绘图算法"]
+        TouchLogic["<b>gt9147_logic.c</b><br/>触摸坐标解析"]
+        UsbService["<b>cdc_acm_ringbuffer.c</b><br/>环形缓冲区管理"]
     end
     
-    subgraph "硬件抽象层 (Our HAL Port)"
-        direction TB
-        LcdPort["<b>lcd_hal_port.c</b><br/>(FSMC 内存映射)"]
-        TouchPort["<b>touch_hal_port.c</b><br/>(软件模拟 I2C)"]
-        UsbPort["<b>CherryUSB BSP/Port</b><br/>(USB 底层中断/FIFO)"]
+    subgraph Layer3["硬件抽象层 (Our HAL Port)"]
+        direction LR
+        LcdPort["<b>lcd_hal_port.c</b><br/>FSMC 内存映射"]
+        TouchPort["<b>touch_hal_port.c</b><br/>软件模拟 I2C"]
+        UsbPort["<b>CherryUSB BSP/Port</b><br/>USB 底层中断/FIFO"]
     end
     
-    subgraph "厂商库 (Vendor Library)"
+    subgraph Layer4["厂商库 (Vendor Library)"]
         direction TB
-        ST_HAL["<b>STM32 HAL 库</b><br/>(HAL_GPIO, HAL_PCD, HAL_RCC)"]
+        ST_HAL["<b>STM32 HAL 库</b><br/>HAL_GPIO, HAL_PCD, HAL_RCC"]
     end
-    
-    %% 定义调用关系
-    Main --> App
     
     App --> LcdLogic
     App --> TouchLogic
@@ -92,60 +84,56 @@ graph TD
     LcdPort --> ST_HAL
     TouchPort --> ST_HAL
     UsbPort --> ST_HAL
+    
+    style Layer1 fill:#D1E8FF,stroke:#004C99,stroke-width:3px
+    style Layer2 fill:#C8F7C5,stroke:#28A745,stroke-width:3px
+    style Layer3 fill:#FFF2E6,stroke:#CC6600,stroke-width:3px
+    style Layer4 fill:#E6FFED,stroke:#006633,stroke-width:3px
 ```
-- 第4层 (应用层): app_terminal.c 负责所有业务逻辑（如“按下SEND键该做什么”），它只调用第3层。
 
-- 第3层 (驱动逻辑层): 负责设备的功能实现（如“画一个圆”或“扫描坐标”），它 100% 独立于 STM32 硬件，只调用第2层。
-
-- 第2层 (硬件抽象层): _hal_port.c 文件，是我们编写的“转接头”，负责将第3层的抽象请求（如“发送I2C字节”）翻译成第1层的具体硬件操作（如调用 HAL_GPIO_WritePin）。
-
-- 第1C层 (厂商库): ST 提供的 HAL 库。
+* **第4层 (应用层)**: `app_terminal.c` 负责所有业务逻辑（如"按下SEND键该做什么"），它只调用第3层。
+* **第3层 (驱动逻辑层)**: 负责设备的功能实现（如"画一个圆"或"扫描坐标"），它 100% 独立于 STM32 硬件，只调用第2层。
+* **第2层 (硬件抽象层)**: `*_hal_port.c` 文件，是我们编写的"转接头"，负责将第3层的抽象请求（如"发送I2C字节"）翻译成第1层的具体硬件操作（如调用 `HAL_GPIO_WritePin`）。
+* **第1层 (厂商库)**: ST 提供的 HAL 库。
 
 ## 🚀 如何编译与运行
-- 环境:
 
-STM32CubeMX (用于配置)
+### 环境要求
 
-EIDI / STM32CubeIDE / GCC (用于编译)
+* **STM32CubeMX** (用于配置)
+* **VS Code EIDE / STM32CubeIDE / GCC** (用于编译)
 
-- 依赖:
+### 依赖项
 
-本项目已包含 CherryUSB 协议栈源码。
+* 本项目已包含 `CherryUSB` 协议栈源码
+* STM32F4 HAL 驱动 (可通过 CubeMX 生成)
 
-STM32F4 HAL 驱动 (可通过 CubeMX 生成)。
+### 编译步骤
 
-- 步骤:
-
-克隆本仓库。
-
-使用 STM32CubeMX 打开 .ioc 文件（如果需要，请根据您的板卡重新配置 FSMC 和 GPIO 引脚）。
-
-在 CubeMX 中点击 "Generate Code"。
-
-在您选择的 IDE (如 Keil) 中打开项目。
-
-编译并下载到您的 STM32 开发板。
+1. 克隆本仓库
+2. 使用 STM32CubeMX 打开 `.ioc` 文件（如果需要，请根据您的板卡重新配置 FSMC 和 GPIO 引脚）
+3. 在 CubeMX 中点击 "Generate Code"
+4. 在 EIDE 中打开项目
+5. 编译并下载到您的 STM32 开发板
 
 ## 🕹️ 如何使用
-- 将程序下载到开发板。
 
-- 使用 USB 线连接开发板的 USB_OTG_FS 端口到您的电脑。
+### 基本操作
 
-- 电脑将自动识别出一个新的 COM 端口（如 COM3）。
+1. 将程序下载到开发板
+2. 使用 USB 线连接开发板的 `USB_OTG_FS` 端口到您的电脑
+3. 电脑将自动识别出一个新的 COM 端口（如 `COM3`）
+4. 打开任意串口调试助手（如 PuTTY, Tera Term, MobaXterm 或 Arduino IDE 的串口监视器），连接到该 COM 端口（波特率任意）
 
-- 打开任意串口调试助手（如 PuTTY, Tera Term, MobaXterm 或 Arduino IDE 的串口监视器），连接到该 COM 端口（波特率任意）。
+### 功能测试
 
-- MCU -> PC: 在开发板的触控键盘上输入 "HELLO" 并按 "SEND"，PC 串口助手应收到 "HELLO"。
-
-- PC -> MCU: 在 PC 串口助手中输入 "STM32 ROCKS" 并发送，开发板的“接收窗口”应显示该消息。
-
-- 测试存储: 测试 Store RX / Query RX / Clear RX 等按钮的功能。
-
-- 测试分包:
-
-- 点击 Send 8-Byte Chunks 按钮，观察 PC 助手连续收到8字节数据包。
-
-- 在 PC 助手依次发送 START，AAA，BBB，END，观察开发板是否能正确重组并显示 AAABBB。
+* **MCU -> PC**: 在开发板的触控键盘上输入 `HELLO` 并按 `SEND`，PC 串口助手应收到 `HELLO`
+* **PC -> MCU**: 在 PC 串口助手中输入 `STM32 ROCKS` 并发送，开发板的"接收窗口"应显示该消息
+* **测试存储**: 测试 `Store RX` / `Query RX` / `Clear RX` 等按钮的功能
+* **测试分包**:
+    * 点击 `Send 8-Byte Chunks` 按钮，观察 PC 助手连续收到8字节数据包
+    * 在 PC 助手依次发送 `START`，`AAA`，`BBB`，`END`，观察开发板是否能正确重组并显示 `AAABBB`
 
 ## 📄 许可
-本项目基于 MIT License 授权。
+
+本项目基于 CC-BY-NC-SA 3.0 授权。
